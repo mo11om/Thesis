@@ -2,8 +2,8 @@ check_point/
 error_analysis/ 
 model_weight/ 
 wandb/ 
-processed_iterable_dataset/ 
- 
+processed_iterable_dataset/
+  
 result/ 
 .ipynb_checkpoints/
 __pycache__/
