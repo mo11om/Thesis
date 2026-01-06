@@ -467,46 +467,144 @@ class FocalLoss(nn.Module):
         
 #         return torch.mean(weighted_loss)
 
-class CB_CE_Loss(nn.Module):
-    def __init__(self, weights, ignore_index=-100):
-        super().__init__()
-        # 1. Ensure weights are a Tensor
-        if not isinstance(weights, torch.Tensor):
-            self.weights = torch.tensor(weights, dtype=torch.float)
-        else:
-            self.weights = weights
+# class CB_CE_Loss(nn.Module):
+#     def __init__(self, weights, ignore_index=-100):
+#         super().__init__()
+#         # 1. Ensure weights are a Tensor
+#         if not isinstance(weights, torch.Tensor):
+#             self.weights = torch.tensor(weights, dtype=torch.float)
+#         else:
+#             self.weights = weights
             
-        self.ignore_index = ignore_index
+#         self.ignore_index = ignore_index
 
+#     def forward(self, logits, targets):
+#         # Calculate standard CE loss
+#         ce_loss = F.cross_entropy(logits, targets, reduction='none', ignore_index=self.ignore_index)
+        
+#         class_weights = self.weights.to(logits.device)
+#         num_weights = len(class_weights)
+        
+#         # 2. Create a safe indices tensor
+#         safe_targets = targets.clone()
+        
+#         # Identify invalid indices:
+#         # - The specific ignore_index (-100)
+#         # - Any index larger than the number of weights we have
+#         # - Any negative index (other than ignore_index)
+#         invalid_mask = (safe_targets == self.ignore_index) | (safe_targets >= num_weights) | (safe_targets < 0)
+        
+#         # Replace invalid indices with 0 to prevent "Index Out of Bounds" crash
+#         safe_targets[invalid_mask] = 0
+        
+#         # 3. Get weights
+#         sample_weights = class_weights[safe_targets]
+        
+#         # 4. Zero out weights for invalid entries so they don't affect loss
+#         sample_weights[invalid_mask] = 0.0
+        
+#         # Apply weights
+#         weighted_loss = ce_loss * sample_weights
+
+#         return torch.mean(weighted_loss)
+
+# class CB_CE_Loss(nn.Module):
+#     '''
+#     https://ieeexplore.ieee.org/abstract/document/8953804
+#     '''
+#     def __init__(self, num_samples, beta=0.99, ignore_index=CLASSIFICATION_MISSING_VALUE):
+#         """
+#         Args:
+#             num_samples: list or tensor, 每個類別的樣本數
+#             beta: 控制 class-balanced 權重的超參數 (通常取 0.99)
+#         """
+#         super(CB_CE_Loss, self).__init__()
+        
+#         # 計算 Class-Balanced 權重
+#         effective_num = 1.0 - torch.pow(torch.tensor(beta), torch.tensor(num_samples))
+#         weights = (1.0 - beta) / (effective_num + 1e-8)
+#         # self.weights = weights / torch.sum(weights)  # normalize
+#         self.weights = weights
+#         self.ignore_index = ignore_index
+        
+#     def forward(self, logits, targets):
+#         """
+#         Args:
+#             logits: (batch_size, num_classes) 模型輸出的 logits
+#             targets: (batch_size,) 類別索引標籤
+#         Returns:
+#             CB-CE Loss 值
+#         """
+        
+#         if targets.dim() > 1:
+#             targets = targets.argmax(dim=-1)
+            
+#         valid_mask = (targets != self.ignore_index)  # 只對有效的 targets 計算 loss
+#         targets = targets[valid_mask]
+#         logits = logits[valid_mask]
+        
+#         # 計算標準 CE Loss
+#         ce_loss = F.cross_entropy(logits, targets, reduction='none', ignore_index=self.ignore_index)
+        
+#         # 依照類別權重調整 loss
+#         class_weights = self.weights.to(logits.device)
+#         weighted_loss = ce_loss * class_weights[targets]
+        
+#         # weighted_loss = ce_loss * class_weights[targets] * weight_mask.float()
+#         return torch.mean(weighted_loss)
+
+#         # return weighted_loss.sum() / weight_mask.sum()  # 只對有效樣本取平均
+
+
+class CB_CE_Loss(nn.Module):
+    '''
+    https://ieeexplore.ieee.org/abstract/document/8953804
+    '''
+    def __init__(self, num_samples, beta=0.99, ignore_index=CLASSIFICATION_MISSING_VALUE):
+        """
+        Args:
+            num_samples: list or tensor, 每個類別的樣本數
+            beta: 控制 class-balanced 權重的超參數 (通常取 0.99)
+        """
+        super(CB_CE_Loss, self).__init__()
+        
+        # 計算 Class-Balanced 權重
+        effective_num = 1.0 - torch.pow(torch.tensor(beta), torch.tensor(num_samples))
+        weights = (1.0 - beta) / (effective_num + 1e-8)
+        # self.weights = weights / torch.sum(weights)  # normalize
+        self.weights = weights
+        self.ignore_index = ignore_index
+        
     def forward(self, logits, targets):
-        # Calculate standard CE loss
+        """
+        Args:
+            logits: (batch_size, num_classes) 模型輸出的 logits
+            targets: (batch_size,) 類別索引標籤
+        Returns:
+            CB-CE Loss 值
+        """
+        
+        if targets.dim() > 1:
+            targets = targets.argmax(dim=-1)
+            
+        valid_mask = (targets != self.ignore_index)  # 只對有效的 targets 計算 loss
+        targets = targets[valid_mask]
+        logits = logits[valid_mask]
+        
+        # 計算標準 CE Loss
         ce_loss = F.cross_entropy(logits, targets, reduction='none', ignore_index=self.ignore_index)
         
+        # 依照類別權重調整 loss
         class_weights = self.weights.to(logits.device)
-        num_weights = len(class_weights)
+        weighted_loss = ce_loss * class_weights[targets]
         
-        # 2. Create a safe indices tensor
-        safe_targets = targets.clone()
-        
-        # Identify invalid indices:
-        # - The specific ignore_index (-100)
-        # - Any index larger than the number of weights we have
-        # - Any negative index (other than ignore_index)
-        invalid_mask = (safe_targets == self.ignore_index) | (safe_targets >= num_weights) | (safe_targets < 0)
-        
-        # Replace invalid indices with 0 to prevent "Index Out of Bounds" crash
-        safe_targets[invalid_mask] = 0
-        
-        # 3. Get weights
-        sample_weights = class_weights[safe_targets]
-        
-        # 4. Zero out weights for invalid entries so they don't affect loss
-        sample_weights[invalid_mask] = 0.0
-        
-        # Apply weights
-        weighted_loss = ce_loss * sample_weights
-
+        # weighted_loss = ce_loss * class_weights[targets] * weight_mask.float()
         return torch.mean(weighted_loss)
+
+        # return weighted_loss.sum() / weight_mask.sum()  # 只對有效樣本取平均
+
+
+
 
 def huber_loss(y_true, y_pred, delta=1.0):
     """Huber Loss"""
@@ -546,7 +644,7 @@ def fact_loss_fn(fact_pred, fact_target, mse_loss=None):
 
 def compute_loss(outputs, targets, values, task_weights=None, hits_k=False, 
                  tag_loss_fn=None, time_loss_fn=None, scale_loss_fn=None, 
-                 neg_loss=None, classification_loss=None, mse_loss=None):
+                 neg_loss_fn=None, classification_loss=None, mse_loss=None):
     """
     計算多任務損失。
     
@@ -586,8 +684,8 @@ def compute_loss(outputs, targets, values, task_weights=None, hits_k=False,
     if "scale" in targets and scale_loss_fn is not None:
         losses["scale"] = scale_loss_fn(outputs["scale"], targets["scale"])
     
-    if "negative" in targets and neg_loss is not None:
-        losses["negative"] = neg_loss(outputs["negative"], targets["negative"])
+    if "negative" in targets and neg_loss_fn is not None:
+        losses["negative"] = neg_loss_fn(outputs["negative"], targets["negative"])
     
     total_loss = sum(task_weights.get(k, 1.0) * losses[k] for k in losses.keys())
     
@@ -635,7 +733,7 @@ def load_checkpoint(model, optimizer, scheduler, save_path, device):
 
 
 def validate_model(model, val_loader, task_weights, device, 
-                   tag_loss_fn=None, time_loss_fn=None, scale_loss_fn=None, neg_loss=None):
+                   tag_loss_fn=None, time_loss_fn=None, scale_loss_fn=None, neg_loss_fn=None):
     """驗證模型"""
     model.eval()
     val_loss = 0
@@ -663,7 +761,7 @@ def validate_model(model, val_loader, task_weights, device,
                                        tag_loss_fn=tag_loss_fn,
                                        time_loss_fn=time_loss_fn,
                                        scale_loss_fn=scale_loss_fn,
-                                       neg_loss=neg_loss)
+                                       neg_loss_fn=neg_loss_fn)
 
             val_loss += loss.item()
             valid_samples += len(batch["input_ids"])
