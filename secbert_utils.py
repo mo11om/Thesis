@@ -309,8 +309,77 @@ class ProcessedIterableDataset(IterableDataset):
 # ============================================================================
 
 
+# class MultiTaskModel(nn.Module):
+#     """多任務 BERT 模型"""
+    
+#     def __init__(self, bert_model_name, num_tags, num_times, num_scales):
+#         super(MultiTaskModel, self).__init__()
+#         self.bert = BertModel.from_pretrained(bert_model_name)
+#         hidden_size = self.bert.config.hidden_size
+        
+#         self.tag_head = nn.Sequential(
+#             nn.Linear(hidden_size, hidden_size // 2),
+#             nn.LayerNorm(hidden_size // 2), 
+#             nn.GELU(),
+#             nn.Dropout(0.3),
+#             nn.Linear(hidden_size // 2, num_tags)
+#         )
+
+#         self.time_head = nn.Sequential(
+#             nn.Linear(hidden_size, hidden_size // 2),
+#             nn.LayerNorm(hidden_size // 2), 
+#             nn.GELU(),
+#             nn.Dropout(0.3),
+#             nn.Linear(hidden_size // 2, num_times)
+#         )
+
+#         self.scale_head = nn.Sequential(
+#             nn.Linear(hidden_size, hidden_size // 2),
+#             nn.LayerNorm(hidden_size // 2), 
+#             nn.GELU(),
+#             nn.Dropout(0.5),
+#             nn.Linear(hidden_size // 2, num_scales)
+#         )
+
+#         self.negative_head = nn.Sequential(
+#             nn.Linear(hidden_size, hidden_size // 2),
+#             nn.LayerNorm(hidden_size // 2), 
+#             nn.GELU(),
+#             nn.Dropout(0.5),
+#             nn.Linear(hidden_size // 2, 2)
+#         )
+        
+#     def forward(self, input_ids, attention_mask, start_tokens, end_tokens):
+#         # BERT output
+#         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+#         sequence_output = outputs.last_hidden_state
+        
+#         # Aggregate target embeddings
+#         target_embeddings = [
+#             sequence_output[i, start_tokens[i]:end_tokens[i] + 1].mean(dim=0)
+#             for i in range(input_ids.size(0))
+#         ]
+        
+#         target_embeddings = torch.stack(target_embeddings)
+        
+#         tag_logits = self.tag_head(target_embeddings)
+#         time_logits = self.time_head(target_embeddings)
+#         scale_logits = self.scale_head(target_embeddings)
+#         negative_logits = self.negative_head(target_embeddings)
+        
+#         return {
+#             "tag": tag_logits,
+#             "time": time_logits,
+#             "scale": scale_logits,
+#             "negative": negative_logits,
+#         }
+
+
 class MultiTaskModel(nn.Module):
-    """多任務 BERT 模型"""
+    """
+    Multi-Task BERT Model with Manifold Mixup Support.
+    Mixes embeddings instead of raw inputs.
+    """
     
     def __init__(self, bert_model_name, num_tags, num_times, num_scales):
         super(MultiTaskModel, self).__init__()
@@ -349,7 +418,10 @@ class MultiTaskModel(nn.Module):
             nn.Linear(hidden_size // 2, 2)
         )
         
-    def forward(self, input_ids, attention_mask, start_tokens, end_tokens):
+    def forward(self, input_ids, attention_mask, start_tokens, end_tokens, do_mixup=False, alpha=1.0):
+        """
+        Forward pass with optional Mixup.
+        """
         # BERT output
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
         sequence_output = outputs.last_hidden_state
@@ -362,6 +434,24 @@ class MultiTaskModel(nn.Module):
         
         target_embeddings = torch.stack(target_embeddings)
         
+        # --- MIXUP LOGIC START ---
+        lam = 1.0
+        perm_index = None
+        is_mixup_active = self.training and do_mixup and alpha > 0
+        
+        if is_mixup_active:
+            # 1. Sample lambda from Beta distribution
+            lam = np.random.beta(alpha, alpha)
+            
+            # 2. Create shuffle index for the batch
+            batch_size = input_ids.size(0)
+            perm_index = torch.randperm(batch_size).to(input_ids.device)
+            
+            # 3. Mix the embeddings: lambda * A + (1-lambda) * B
+            # This is "Manifold Mixup" applied at the embedding layer
+            target_embeddings = lam * target_embeddings + (1 - lam) * target_embeddings[perm_index]
+        # --- MIXUP LOGIC END ---
+        
         tag_logits = self.tag_head(target_embeddings)
         time_logits = self.time_head(target_embeddings)
         scale_logits = self.scale_head(target_embeddings)
@@ -372,9 +462,12 @@ class MultiTaskModel(nn.Module):
             "time": time_logits,
             "scale": scale_logits,
             "negative": negative_logits,
+            "mixup_info": {
+                "active": is_mixup_active,
+                "lam": lam,
+                "perm_index": perm_index
+            }
         }
-
-
 # ============================================================================
 # Metrics & Loss
 # ============================================================================
@@ -694,6 +787,51 @@ def compute_loss(outputs, targets, values, task_weights=None, hits_k=False,
     return (total_loss, losses, tag_hits_k) if hits_k else (total_loss, losses)
 
 
+def compute_loss_with_mixup(outputs, targets, values, task_weights=None, **kwargs
+                            #                  tag_loss_fn=None, time_loss_fn=None, scale_loss_fn=None, 
+#                  neg_loss_fn=None, classification_loss=None, mse_loss=None
+):
+    """
+    Wrapper around compute_loss to handle Mixup training.
+    Computes loss for original targets and mixed targets, then blends them.
+    """
+    mixup_info = outputs.get("mixup_info", {"active": False})
+    
+    # 1. Calculate Standard Loss (Loss A)
+    loss_a, losses_a = compute_loss(outputs, targets, values, task_weights, **kwargs)
+    
+    # If Mixup is not active, return standard loss
+    if not mixup_info["active"]:
+        return loss_a, losses_a
+
+    # 2. Calculate Mixed Loss (Loss B)
+    lam = mixup_info["lam"]
+    perm_index = mixup_info["perm_index"]
+    
+    # Shuffle targets and values to match the mixed embeddings (Sample B)
+    targets_b = {k: v[perm_index] for k, v in targets.items()}
+    values_b = values[perm_index]
+    
+    # Compute loss against shuffled targets using the SAME outputs
+    loss_b, losses_b = compute_loss(outputs, targets_b, values_b, task_weights, **kwargs)
+    
+    # 3. Combine Losses: lam * Loss_A + (1-lam) * Loss_B
+    total_loss = lam * loss_a + (1 - lam) * loss_b
+    
+    # Combine individual loss logs for logging
+    combined_losses = {}
+    all_keys = set(losses_a.keys()) | set(losses_b.keys())
+    
+    for key in all_keys:
+        val_a = losses_a.get(key, 0)
+        val_b = losses_b.get(key, 0)
+        
+        if torch.is_tensor(val_a): val_a = val_a.item()
+        if torch.is_tensor(val_b): val_b = val_b.item()
+        
+        combined_losses[key] = lam * val_a + (1 - lam) * val_b
+        
+    return total_loss, combined_losses
 # ============================================================================
 # Checkpoint Management
 # ============================================================================
