@@ -24,6 +24,85 @@ from transformers import BertModel
 from sklearn.utils.class_weight import compute_class_weight
 
 # ============================================================================
+# Configuration Management
+# ============================================================================
+
+def load_model_config(config_path):
+    """
+    Load model configuration saved during training.
+    
+    Args:
+        config_path: Path to the model_config.json file
+        
+    Returns:
+        Dictionary containing model configuration including mappings and constants
+        
+    Raises:
+        FileNotFoundError: If config file doesn't exist
+    """
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(
+            f"❌ Config file not found: {config_path}\n"
+            f"   Make sure the training notebook saved model_config.json"
+        )
+    
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    
+    print(f"✅ Config loaded from: {config_path}")
+    return config
+
+
+def save_model_config(model, tag2id, time2id, scale2id, output_dir, run_name):
+    """
+    Save model configuration and ID mappings to JSON file.
+    
+    This function saves all necessary configuration for loading and testing
+    the model later, ensuring consistency between training and testing.
+    
+    Args:
+        model: MultiTaskModel instance
+        tag2id: Dictionary mapping tags to indices
+        time2id: Dictionary mapping time values to indices
+        scale2id: Dictionary mapping scale values to indices
+        output_dir: Directory to save config file
+        run_name: Name for the run (used in config filename)
+        
+    Returns:
+        str: Path to the saved config file
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    config = {
+        "run_name": run_name,
+        "tag2id": tag2id,
+        "time2id": time2id,
+        "scale2id": scale2id,
+        "id2tag": {int(v): k for k, v in tag2id.items()},
+        "id2time": {int(v): k for k, v in time2id.items()},
+        "id2scale": {int(v): k for k, v in scale2id.items()},
+        "classification_missing_value": -100,
+        "numeric_missing_value": float(torch.finfo(torch.float32).max),
+        "model_args": {
+            "bert_model_name": model.bert.config._name_or_path,
+            "num_tags": len(tag2id),
+            "num_times": len(time2id),
+            "num_scales": len(scale2id),
+            "hidden_size": model.bert.config.hidden_size,
+        }
+    }
+
+    config_filename = f"{run_name}_config.json"
+    config_path = os.path.join(output_dir, config_filename)
+
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=4, ensure_ascii=False)
+
+    print(f"✅ Configuration saved to: {config_path}")
+    return config_path
+
+
+# ============================================================================
 # Global Constants
 # ============================================================================
 
@@ -205,6 +284,14 @@ def process_data(data, target_attrs, tokenizer, batch_size=32, num_workers=8, ta
         inputs.extend(res)
     
     return inputs
+
+
+
+
+def count_lines(file_path):
+    """Count number of lines in a file."""
+    with open(file_path, "r", encoding="utf-8") as f:
+        return sum(1 for _ in f)
 
 
 # ============================================================================
