@@ -307,73 +307,182 @@ class ProcessedIterableDataset(IterableDataset):
 # ============================================================================
 # Model
 # ============================================================================
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
+class NoiseLayer(nn.Module):
+    """
+    PyTorch implementation of the Channel layer (Goldberger & Ben-Reuven, ICLR 2017).
+    Maps clean class probabilities to noisy class probabilities via a transition matrix.
+    """
+    def __init__(self, num_classes, init_identity=True):
+        super(NoiseLayer, self).__init__()
+        self.num_classes = num_classes
+        # The weights represent the unnormalized log-probabilities of the confusion matrix
+        self.weight = nn.Parameter(torch.Tensor(num_classes, num_classes))
+        
+        if init_identity:
+            self.init_identity()
+        else:
+            nn.init.xavier_uniform_(self.weight)
+
+    def init_identity(self):
+        """Initialize weights so that softmax(weights) approximates the Identity matrix."""
+        with torch.no_grad():
+            # Set off-diagonals to a low value and diagonals to a high value
+            self.weight.data.fill_(-2.0) 
+            self.weight.data.diagonal().fill_(5.0)
+
+    def forward(self, input_probs):
+        """
+        Args:
+            input_probs: (batch_size, num_classes) - The clean probabilities p(y_true)
+        Returns:
+            noisy_probs: (batch_size, num_classes) - The noisy probabilities p(y_noisy)
+        """
+        # T[i, j] = P(noisy=j | clean=i)
+        # Apply softmax to rows to ensure they sum to 1 (row-stochastic)
+        P = F.softmax(self.weight, dim=1) 
+        
+        # Matrix multiplication: (batch, classes) @ (classes, classes) -> (batch, classes)
+        return torch.matmul(input_probs, P)
+
+# class MultiTaskModel(nn.Module):
+#     """多任務 BERT 模型"""
+    
+#     def __init__(self, bert_model_name, num_tags, num_times, num_scales):
+#         super(MultiTaskModel, self).__init__()
+#         self.bert = BertModel.from_pretrained(bert_model_name)
+#         hidden_size = self.bert.config.hidden_size
+        
+#         self.tag_head = nn.Sequential(
+#             nn.Linear(hidden_size, hidden_size // 2),
+#             nn.LayerNorm(hidden_size // 2), 
+#             nn.GELU(),
+#             nn.Dropout(0.3),
+#             nn.Linear(hidden_size // 2, num_tags)
+#         )
+
+#         self.time_head = nn.Sequential(
+#             nn.Linear(hidden_size, hidden_size // 2),
+#             nn.LayerNorm(hidden_size // 2), 
+#             nn.GELU(),
+#             nn.Dropout(0.3),
+#             nn.Linear(hidden_size // 2, num_times)
+#         )
+
+#         self.scale_head = nn.Sequential(
+#             nn.Linear(hidden_size, hidden_size // 2),
+#             nn.LayerNorm(hidden_size // 2), 
+#             nn.GELU(),
+#             nn.Dropout(0.5),
+#             nn.Linear(hidden_size // 2, num_scales)
+#         )
+
+#         self.negative_head = nn.Sequential(
+#             nn.Linear(hidden_size, hidden_size // 2),
+#             nn.LayerNorm(hidden_size // 2), 
+#             nn.GELU(),
+#             nn.Dropout(0.5),
+#             nn.Linear(hidden_size // 2, 2)
+#         )
+        
+#     def forward(self, input_ids, attention_mask, start_tokens, end_tokens):
+#         # BERT output
+#         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
+#         sequence_output = outputs.last_hidden_state
+        
+#         # Aggregate target embeddings
+#         target_embeddings = [
+#             sequence_output[i, start_tokens[i]:end_tokens[i] + 1].mean(dim=0)
+#             for i in range(input_ids.size(0))
+#         ]
+        
+#         target_embeddings = torch.stack(target_embeddings)
+        
+#         tag_logits = self.tag_head(target_embeddings)
+#         time_logits = self.time_head(target_embeddings)
+#         scale_logits = self.scale_head(target_embeddings)
+#         negative_logits = self.negative_head(target_embeddings)
+        
+#         return {
+#             "tag": tag_logits,
+#             "time": time_logits,
+#             "scale": scale_logits,
+#             "negative": negative_logits,
+#         }
 
 class MultiTaskModel(nn.Module):
-    """多任務 BERT 模型"""
-    
-    def __init__(self, bert_model_name, num_tags, num_times, num_scales):
+    def __init__(self, bert_model_name, num_tags, num_times, num_scales, use_noise_layer=True):
         super(MultiTaskModel, self).__init__()
         self.bert = BertModel.from_pretrained(bert_model_name)
         hidden_size = self.bert.config.hidden_size
-        
+        self.use_noise_layer = use_noise_layer
+
+        # --- Classification Heads ---
         self.tag_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
-            nn.LayerNorm(hidden_size // 2), 
-            nn.GELU(),
-            nn.Dropout(0.3),
+            nn.LayerNorm(hidden_size // 2), nn.GELU(), nn.Dropout(0.3),
             nn.Linear(hidden_size // 2, num_tags)
         )
-
         self.time_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
-            nn.LayerNorm(hidden_size // 2), 
-            nn.GELU(),
-            nn.Dropout(0.3),
+            nn.LayerNorm(hidden_size // 2), nn.GELU(), nn.Dropout(0.3),
             nn.Linear(hidden_size // 2, num_times)
         )
-
         self.scale_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
-            nn.LayerNorm(hidden_size // 2), 
-            nn.GELU(),
-            nn.Dropout(0.5),
+            nn.LayerNorm(hidden_size // 2), nn.GELU(), nn.Dropout(0.5),
             nn.Linear(hidden_size // 2, num_scales)
         )
-
         self.negative_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size // 2),
-            nn.LayerNorm(hidden_size // 2), 
-            nn.GELU(),
-            nn.Dropout(0.5),
+            nn.LayerNorm(hidden_size // 2), nn.GELU(), nn.Dropout(0.5),
             nn.Linear(hidden_size // 2, 2)
         )
-        
+
+        # --- Noise Adaptation Layers ---
+        if self.use_noise_layer:
+            self.tag_noise = NoiseLayer(num_tags)
+            self.time_noise = NoiseLayer(num_times)
+            self.scale_noise = NoiseLayer(num_scales)
+            self.negative_noise = NoiseLayer(2)
+
     def forward(self, input_ids, attention_mask, start_tokens, end_tokens):
-        # BERT output
+        # 1. BERT Encoding
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
         sequence_output = outputs.last_hidden_state
         
-        # Aggregate target embeddings
+        # 2. Aggregate Embeddings
         target_embeddings = [
             sequence_output[i, start_tokens[i]:end_tokens[i] + 1].mean(dim=0)
             for i in range(input_ids.size(0))
         ]
-        
         target_embeddings = torch.stack(target_embeddings)
         
+        # 3. Base Prediction (Logits -> "Clean" Predictions)
         tag_logits = self.tag_head(target_embeddings)
         time_logits = self.time_head(target_embeddings)
         scale_logits = self.scale_head(target_embeddings)
         negative_logits = self.negative_head(target_embeddings)
         
-        return {
+        results = {
             "tag": tag_logits,
             "time": time_logits,
             "scale": scale_logits,
             "negative": negative_logits,
         }
 
+        # 4. Apply Noise Layer (if enabled)
+        # We convert logits to probabilities using Softmax, then pass through Noise Matrix
+        if self.use_noise_layer:
+            results["tag_noisy"] = self.tag_noise(F.softmax(tag_logits, dim=-1))
+            results["time_noisy"] = self.time_noise(F.softmax(time_logits, dim=-1))
+            results["scale_noisy"] = self.scale_noise(F.softmax(scale_logits, dim=-1))
+            results["negative_noisy"] = self.negative_noise(F.softmax(negative_logits, dim=-1))
+
+        return results
 
 # ============================================================================
 # Metrics & Loss
@@ -642,57 +751,112 @@ def fact_loss_fn(fact_pred, fact_target, mse_loss=None):
     return huber_part + mse_part
 
 
+# def compute_loss(outputs, targets, values, task_weights=None, hits_k=False, 
+#                  tag_loss_fn=None, time_loss_fn=None, scale_loss_fn=None, 
+#                  neg_loss_fn=None, classification_loss=None, mse_loss=None):
+#     """
+#     計算多任務損失。
+    
+#     Args:
+#         outputs: 模型輸出
+#         targets: 目標值
+#         values: 數值目標
+#         task_weights: 任務權重
+#         hits_k: 是否計算 hits@k
+#         tag_loss_fn, time_loss_fn, scale_loss_fn, neg_loss: 各任務的損失函數
+#         classification_loss, mse_loss: 通用損失函數
+#     """
+    
+#     if task_weights is None:
+#         task_weights = {"tag": 1.0, "time": 1.0, "scale": 1.0, "negative": 1.0}
+    
+#     if classification_loss is None:
+#         classification_loss = nn.CrossEntropyLoss(ignore_index=CLASSIFICATION_MISSING_VALUE)
+    
+#     if mse_loss is None:
+#         mse_loss = nn.MSELoss()
+    
+#     losses = {}
+#     tag_hits_k = {}
+    
+#     if "tag" in targets and tag_loss_fn is not None:
+#         losses["tag"] = tag_loss_fn(outputs["tag"], targets["tag"])
+        
+#         if hits_k:
+#             tag_hits_k["hits_1"] = hits_at_k(outputs["tag"], targets["tag"], k=1)
+#             tag_hits_k["hits_3"] = hits_at_k(outputs["tag"], targets["tag"], k=3)
+#             tag_hits_k["hits_5"] = hits_at_k(outputs["tag"], targets["tag"], k=5)
+
+#     if "time" in targets and time_loss_fn is not None:
+#         losses["time"] = time_loss_fn(outputs["time"], targets["time"])
+    
+#     if "scale" in targets and scale_loss_fn is not None:
+#         losses["scale"] = scale_loss_fn(outputs["scale"], targets["scale"])
+    
+#     if "negative" in targets and neg_loss_fn is not None:
+#         losses["negative"] = neg_loss_fn(outputs["negative"], targets["negative"])
+    
+#     total_loss = sum(task_weights.get(k, 1.0) * losses[k] for k in losses.keys())
+    
+#     total_loss = total_loss / sum(task_weights.values())
+
+#     return (total_loss, losses, tag_hits_k) if hits_k else (total_loss, losses)
+
+
 def compute_loss(outputs, targets, values, task_weights=None, hits_k=False, 
                  tag_loss_fn=None, time_loss_fn=None, scale_loss_fn=None, 
-                 neg_loss_fn=None, classification_loss=None, mse_loss=None):
-    """
-    計算多任務損失。
-    
-    Args:
-        outputs: 模型輸出
-        targets: 目標值
-        values: 數值目標
-        task_weights: 任務權重
-        hits_k: 是否計算 hits@k
-        tag_loss_fn, time_loss_fn, scale_loss_fn, neg_loss: 各任務的損失函數
-        classification_loss, mse_loss: 通用損失函數
-    """
-    
-    if task_weights is None:
-        task_weights = {"tag": 1.0, "time": 1.0, "scale": 1.0, "negative": 1.0}
-    
-    if classification_loss is None:
-        classification_loss = nn.CrossEntropyLoss(ignore_index=CLASSIFICATION_MISSING_VALUE)
-    
-    if mse_loss is None:
-        mse_loss = nn.MSELoss()
+                 neg_loss_fn=None, classification_loss=None):
     
     losses = {}
     tag_hits_k = {}
     
-    if "tag" in targets and tag_loss_fn is not None:
-        losses["tag"] = tag_loss_fn(outputs["tag"], targets["tag"])
-        
+    # Helper to calculate NLL for noisy probabilities
+    # Since outputs are already probabilities, we use NLLLoss with log()
+    def noisy_loss(probs, target, ignore_index=-100):
+        # Avoid log(0)
+        log_probs = torch.log(probs + 1e-8)
+        # Use NLLLoss; shape of log_probs is (batch, classes)
+        return F.nll_loss(log_probs, target, ignore_index=ignore_index)
+
+    # --- TAG LOSS ---
+    if "tag" in targets:
+        # Use noisy output for training loss if available
+        if "tag_noisy" in outputs:
+            losses["tag"] = noisy_loss(outputs["tag_noisy"], targets["tag"])
+        else:
+            losses["tag"] = tag_loss_fn(outputs["tag"], targets["tag"])
+
+        # Use CLEAN logits for Metrics (Hits@K)
         if hits_k:
             tag_hits_k["hits_1"] = hits_at_k(outputs["tag"], targets["tag"], k=1)
             tag_hits_k["hits_3"] = hits_at_k(outputs["tag"], targets["tag"], k=3)
-            tag_hits_k["hits_5"] = hits_at_k(outputs["tag"], targets["tag"], k=5)
 
-    if "time" in targets and time_loss_fn is not None:
-        losses["time"] = time_loss_fn(outputs["time"], targets["time"])
-    
-    if "scale" in targets and scale_loss_fn is not None:
-        losses["scale"] = scale_loss_fn(outputs["scale"], targets["scale"])
-    
-    if "negative" in targets and neg_loss_fn is not None:
-        losses["negative"] = neg_loss_fn(outputs["negative"], targets["negative"])
-    
+    # --- TIME LOSS ---
+    if "time" in targets:
+        if "time_noisy" in outputs:
+            losses["time"] = noisy_loss(outputs["time_noisy"], targets["time"])
+        else:
+            losses["time"] = time_loss_fn(outputs["time"], targets["time"])
+
+    # --- SCALE LOSS ---
+    if "scale" in targets:
+        if "scale_noisy" in outputs:
+            losses["scale"] = noisy_loss(outputs["scale_noisy"], targets["scale"])
+        else:
+            losses["scale"] = scale_loss_fn(outputs["scale"], targets["scale"])
+
+    # --- NEGATIVE LOSS ---
+    if "negative" in targets:
+        if "negative_noisy" in outputs:
+            losses["negative"] = noisy_loss(outputs["negative_noisy"], targets["negative"])
+        else:
+            losses["negative"] = neg_loss_fn(outputs["negative"], targets["negative"])
+
+    # Compute weighted total
     total_loss = sum(task_weights.get(k, 1.0) * losses[k] for k in losses.keys())
-    
     total_loss = total_loss / sum(task_weights.values())
 
     return (total_loss, losses, tag_hits_k) if hits_k else (total_loss, losses)
-
 
 # ============================================================================
 # Checkpoint Management
