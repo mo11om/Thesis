@@ -8,3 +8,4 @@ result/
 .ipynb_checkpoints/
 __pycache__/
 sister/fewshot/few-shot.ipynb
+sister/fewshot/.env
