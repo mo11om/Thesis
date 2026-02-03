@@ -1,0 +1,36 @@
+{
+    "description": "Hyperparameter tuning specification. Modify this file to define which parameters to sweep.",
+    "parameters": {
+        "training.gate_reg_weights.tag": {
+            "type": "discrete",
+            "values": [
+                5,
+                9
+            ]
+        },
+        "training.gate_reg_weights.time": {
+            "type": "discrete",
+            "values": [
+                15
+            ]
+        },
+        "training.gate_reg_weights.scale": {
+            "type": "discrete",
+            "values": [
+                15
+            ]
+        },
+        "training.gate_reg_weights.negative": {
+            "type": "discrete",
+            "values": [
+                15
+            ]
+        }
+    },
+    "settings": {
+        "search_type": "grid",
+        "max_trials": null,
+        "log_dir": "log",
+        "output_file": "tuning_results.csv"
+    }
+}
