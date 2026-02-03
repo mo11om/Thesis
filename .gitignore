@@ -9,3 +9,6 @@ result/
 __pycache__/
 sister/fewshot/few-shot.ipynb
 sister/fewshot/.env
+gate/*.csv
+log/*.json
+log/*.csv
