@@ -694,6 +694,112 @@ def compute_loss(outputs, targets, values, task_weights=None, hits_k=False,
     return (total_loss, losses, tag_hits_k) if hits_k else (total_loss, losses)
 
 
+def compute_coteaching_loss(outputs1, outputs2, targets, forget_rate,
+                            task_weights=None, ignore_index=CLASSIFICATION_MISSING_VALUE):
+    """
+    Co-teaching loss: 兩個模型互相選擇小損失樣本進行交叉訓練。
+    
+    Args:
+        outputs1: Model 1 的輸出 dict {"tag": ..., "time": ..., "scale": ..., "negative": ...}
+        outputs2: Model 2 的輸出 dict
+        targets: Ground truth dict {"tag": ..., "time": ..., "scale": ..., "negative": ...}
+        forget_rate: 當前的遺忘率 (0~1)，決定要丟棄多少比例的大損失樣本
+        task_weights: 任務權重 dict
+        ignore_index: 標記缺失標籤的值
+    
+    Returns:
+        (loss1, loss2, loss_details): 
+            loss1 用來更新 Model 1 (由 Model 2 選出的樣本)
+            loss2 用來更新 Model 2 (由 Model 1 選出的樣本)
+            loss_details: dict 包含各任務的損失資訊
+    """
+    if task_weights is None:
+        task_weights = {"tag": 1.0, "time": 1.0, "scale": 1.0, "negative": 1.0}
+    
+    task_keys = ["tag", "time", "scale", "negative"]
+    device = outputs1["tag"].device
+    
+    # 收集各任務的損失
+    losses1 = {}  # 最終要反向傳播給 Model 1 的損失
+    losses2 = {}  # 最終要反向傳播給 Model 2 的損失
+    loss_details = {}
+    
+    for task in task_keys:
+        if task not in targets:
+            continue
+        
+        logits1 = outputs1[task]  # (batch_size, num_classes)
+        logits2 = outputs2[task]  # (batch_size, num_classes)
+        target = targets[task]    # (batch_size,)
+        num_classes = logits1.shape[1]
+        
+        # 找出有效樣本 (非 ignore_index 且在有效範圍內)
+        valid_mask = (target != ignore_index) & (target >= 0) & (target < num_classes)
+        num_valid = valid_mask.sum().item()
+        
+        if num_valid == 0:
+            # 沒有有效樣本，給零損失
+            losses1[task] = torch.tensor(0.0, device=device, requires_grad=True)
+            losses2[task] = torch.tensor(0.0, device=device, requires_grad=True)
+            loss_details[task] = 0.0
+            continue
+        
+        # 計算每個有效樣本的 per-sample CE loss (不做 reduction)
+        # 使用 no_grad 計算選擇用的損失，節省記憶體
+        with torch.no_grad():
+            # 把無效樣本的 target 暫時設為 0，避免 index out of bounds
+            safe_target = target.clone()
+            safe_target[~valid_mask] = 0
+            
+            loss1_per_sample = F.cross_entropy(logits1, safe_target, reduction='none')  # (batch_size,)
+            loss2_per_sample = F.cross_entropy(logits2, safe_target, reduction='none')  # (batch_size,)
+            
+            # 把無效樣本的損失設為 inf，這樣排序時它們會排到最後被丟棄
+            loss1_per_sample[~valid_mask] = float('inf')
+            loss2_per_sample[~valid_mask] = float('inf')
+            
+            # 計算要記住多少個樣本
+            num_remember = max(1, int((1 - forget_rate) * num_valid))
+            
+            # Model 1 按損失排序，選出小損失的 indices
+            _, sorted_idx1 = torch.sort(loss1_per_sample)
+            selected_idx1 = sorted_idx1[:num_remember]
+            
+            # Model 2 按損失排序，選出小損失的 indices
+            _, sorted_idx2 = torch.sort(loss2_per_sample)
+            selected_idx2 = sorted_idx2[:num_remember]
+        
+        # 交叉更新：Model 2 選出的樣本用來訓練 Model 1，反之亦然
+        # Model 1 的損失：用 Model 2 選出的 indices
+        loss1_selected = F.cross_entropy(
+            logits1[selected_idx2], target[selected_idx2], reduction='mean'
+        )
+        
+        # Model 2 的損失：用 Model 1 選出的 indices
+        loss2_selected = F.cross_entropy(
+            logits2[selected_idx1], target[selected_idx1], reduction='mean'
+        )
+        
+        losses1[task] = loss1_selected
+        losses2[task] = loss2_selected
+        loss_details[task] = {
+            "loss1": loss1_selected.item(),
+            "loss2": loss2_selected.item(),
+            "num_valid": num_valid,
+            "num_remember": num_remember,
+        }
+    
+    # 加權求和
+    weight_sum = sum(task_weights.get(k, 1.0) for k in task_keys if k in losses1)
+    if weight_sum == 0:
+        weight_sum = 1.0
+    
+    total_loss1 = sum(task_weights.get(k, 1.0) * losses1[k] for k in losses1) / weight_sum
+    total_loss2 = sum(task_weights.get(k, 1.0) * losses2[k] for k in losses2) / weight_sum
+    
+    return total_loss1, total_loss2, loss_details
+
+
 # ============================================================================
 # Checkpoint Management
 # ============================================================================
@@ -724,6 +830,45 @@ def load_checkpoint(model, optimizer, scheduler, save_path, device):
     epoch = checkpoint['epoch']
     step = checkpoint['step']
     print(f"Checkpoint loaded: epoch {epoch}, step {step}")
+    return epoch, step
+
+
+def save_coteaching_checkpoint(model1, model2, optimizer1, optimizer2, 
+                               scheduler1, scheduler2, epoch, step, 
+                               save_path="coteaching_checkpoint.pth"):
+    """保存 Co-teaching 雙模型檢查點"""
+    checkpoint = {
+        'epoch': epoch,
+        'step': step,
+        'model1_state_dict': model1.state_dict(),
+        'model2_state_dict': model2.state_dict(),
+        'optimizer1_state_dict': optimizer1.state_dict(),
+        'optimizer2_state_dict': optimizer2.state_dict(),
+        'scheduler1_state_dict': scheduler1.state_dict() if scheduler1 else None,
+        'scheduler2_state_dict': scheduler2.state_dict() if scheduler2 else None,
+    }
+    torch.save(checkpoint, save_path)
+    print(f"Co-teaching checkpoint saved at {save_path}")
+
+
+def load_coteaching_checkpoint(model1, model2, optimizer1, optimizer2, 
+                               scheduler1, scheduler2, save_path, device):
+    """載入 Co-teaching 雙模型檢查點"""
+    checkpoint = torch.load(save_path, map_location=device)
+    
+    model1.load_state_dict(checkpoint['model1_state_dict'])
+    model2.load_state_dict(checkpoint['model2_state_dict'])
+    optimizer1.load_state_dict(checkpoint['optimizer1_state_dict'])
+    optimizer2.load_state_dict(checkpoint['optimizer2_state_dict'])
+    
+    if checkpoint.get('scheduler1_state_dict'):
+        scheduler1.load_state_dict(checkpoint['scheduler1_state_dict'])
+    if checkpoint.get('scheduler2_state_dict'):
+        scheduler2.load_state_dict(checkpoint['scheduler2_state_dict'])
+    
+    epoch = checkpoint['epoch']
+    step = checkpoint['step']
+    print(f"Co-teaching checkpoint loaded: epoch {epoch}, step {step}")
     return epoch, step
 
 
