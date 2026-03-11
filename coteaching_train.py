@@ -78,8 +78,8 @@ config = {
     "task_weights": {"tag": 10.0, "time": 0.3, "scale": 0.2, "negative": 10.0},
 
     # --- Co-teaching ---
-    "noise_rate": 0.2,       # 估計的雜訊率 (forget_rate 的上限)
-    "num_gradual": 10,       # 預熱 epochs，forget_rate 在此期間線性增長
+    "noise_rate": 0.1,       # 估計的雜訊率 (forget_rate 的上限)
+    "num_gradual": 1,       # 預熱 epochs，forget_rate 在此期間線性增長
 
     # --- wandb ---
     "wandb_project": "multi-task-model",
