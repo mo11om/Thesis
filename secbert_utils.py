@@ -77,7 +77,30 @@ def load_counter(target_attr):
     with open(target_path, "r", encoding='utf-8') as f:
         data = json.load(f)
     return data
+# ============================================================================
+# SelfMix Helpers
+# ============================================================================
 
+def compute_multitask_kl_loss(logits_1, logits_2, ignore_index=-100):
+    """
+    Computes symmetric KL divergence across multiple task logits.
+    Ensures consistency between two dropout-perturbed forward passes.
+    """
+    total_kl = 0.0
+    valid_tasks = 0
+    
+    for task_key in logits_1.keys():
+        p = logits_1[task_key]
+        q = logits_2[task_key]
+        
+        # Symmetrical KL Divergence
+        p_loss = F.kl_div(F.log_softmax(p, dim=-1), F.softmax(q, dim=-1), reduction='batchmean')
+        q_loss = F.kl_div(F.log_softmax(q, dim=-1), F.softmax(p, dim=-1), reduction='batchmean')
+        
+        total_kl += (p_loss + q_loss) / 2
+        valid_tasks += 1
+        
+    return total_kl / valid_tasks if valid_tasks > 0 else torch.tensor(0.0).to(logits_1['tag'].device)
 
 # ============================================================================
 # Data Processing
@@ -303,14 +326,12 @@ class ProcessedIterableDataset(IterableDataset):
                 
                 yield processed_data
 
-
 # ============================================================================
 # Model
 # ============================================================================
 
-
 class MultiTaskModel(nn.Module):
-    """多任務 BERT 模型"""
+    """Multi-task BERT model refactored for SelfMix textual-level mixup."""
     
     def __init__(self, bert_model_name, num_tags, num_times, num_scales):
         super(MultiTaskModel, self).__init__()
@@ -349,19 +370,20 @@ class MultiTaskModel(nn.Module):
             nn.Linear(hidden_size // 2, 2)
         )
         
-    def forward(self, input_ids, attention_mask, start_tokens, end_tokens):
-        # BERT output
+    def get_embeddings(self, input_ids, attention_mask, start_tokens, end_tokens):
+        """Extracts text-level embeddings for target spans, enabling Mixup."""
         outputs = self.bert(input_ids=input_ids, attention_mask=attention_mask)
         sequence_output = outputs.last_hidden_state
         
-        # Aggregate target embeddings
+        # Aggregate target embeddings based on span positions
         target_embeddings = [
             sequence_output[i, start_tokens[i]:end_tokens[i] + 1].mean(dim=0)
             for i in range(input_ids.size(0))
         ]
-        
-        target_embeddings = torch.stack(target_embeddings)
-        
+        return torch.stack(target_embeddings)
+
+    def classify(self, target_embeddings):
+        """Passes aggregated span embeddings through task-specific MLPs."""
         tag_logits = self.tag_head(target_embeddings)
         time_logits = self.time_head(target_embeddings)
         scale_logits = self.scale_head(target_embeddings)
@@ -374,6 +396,9 @@ class MultiTaskModel(nn.Module):
             "negative": negative_logits,
         }
 
+    def forward(self, input_ids, attention_mask, start_tokens, end_tokens):
+        target_embeddings = self.get_embeddings(input_ids, attention_mask, start_tokens, end_tokens)
+        return self.classify(target_embeddings)
 
 # ============================================================================
 # Metrics & Loss
