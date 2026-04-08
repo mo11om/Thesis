@@ -308,7 +308,110 @@ class ProcessedIterableDataset(IterableDataset):
 # Model
 # ============================================================================
 
+import faiss
+import torch
+import torch.nn.functional as F
+from tqdm import tqdm
+from collections import Counter
 
+def extract_features_and_labels(model, dataloader, device):
+    """Extracts [CLS] embeddings, current labels, and model predictions for SSR."""
+    model.eval()
+    all_features = []
+    all_labels = []
+    all_logits = []
+    
+    with torch.no_grad():
+        for batch in tqdm(dataloader, desc="Extracting Features for SSR"):
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            start_tokens = batch["start_token"].to(device)
+            end_tokens = batch["end_token"].to(device)
+            
+            # Using tag as the primary noisy label
+            labels = batch["tag"].to(device)
+            
+            # Forward pass
+            outputs = model.bert(input_ids=input_ids, attention_mask=attention_mask)
+            # Use [CLS] token representation for SSR topological distance
+            features = outputs.last_hidden_state[:, 0, :] 
+            features = F.normalize(features, p=2, dim=1)
+            
+            # Get PMC predictions for the tag task
+            logits = model.tag_head(features) # Assuming [CLS] is passed to a generic head, or use span embeddings
+            
+            all_features.append(features.cpu())
+            all_labels.append(labels.cpu())
+            all_logits.append(logits.cpu())
+            
+    return torch.cat(all_features), torch.cat(all_labels), torch.cat(all_logits)
+
+
+def ssr_relabel_and_select(features, labels, logits, theta_r=0.9, theta_s=1.0, k=50, num_classes=978):
+    """
+    Implements the PMC Relabelling and NPK Sample Selection.
+    Returns:
+        selected_indices (Tensor): Indices of clean samples to train on.
+        new_labels (Tensor): The relabelled target tensor.
+    """
+    N = features.size(0)
+    probs = F.softmax(logits, dim=1)
+    max_probs, preds = torch.max(probs, dim=1)
+    
+    # 1. Relabelling Mechanism (PMC thresholding)
+    new_labels = labels.clone()
+    relabel_mask = max_probs > theta_r
+    new_labels[relabel_mask] = preds[relabel_mask]
+    
+    # Calculate class distribution \pi for balancing
+    valid_mask = new_labels != -100
+    label_counts = torch.bincount(new_labels[valid_mask], minlength=num_classes).float()
+    pi = label_counts / label_counts.sum()
+    pi[pi == 0] = 1e-8 # Prevent division by zero
+    
+    # 2. k-NN Density Calculation (NPK) using FAISS (Cosine Similarity)
+    print("Computing k-NN for sample selection...")
+    index = faiss.IndexFlatIP(features.shape[1]) # Inner product of normalized vectors = Cosine Sim
+    faiss_features = features.numpy()
+    index.add(faiss_features)
+    distances, indices = index.search(faiss_features, k + 1) # +1 because sample finds itself
+    
+    indices = torch.tensor(indices[:, 1:]) # Drop self-reference
+    
+    # Calculate neighborhood label distribution q_i'
+    selected_mask = torch.zeros(N, dtype=torch.bool)
+    
+    for i in tqdm(range(N), desc="Selecting Clean Samples"):
+        if new_labels[i] == -100:
+            continue
+            
+        neighbor_labels = new_labels[indices[i]]
+        valid_neighbors = neighbor_labels[neighbor_labels != -100]
+        
+        if len(valid_neighbors) == 0:
+            continue
+            
+        q_i_prime = torch.bincount(valid_neighbors, minlength=num_classes).float() / len(valid_neighbors)
+        
+        # Balance the distribution
+        q_i = q_i_prime / pi
+        
+        # Consistency measure c_i
+        c_i = q_i[new_labels[i]] / (q_i.max() + 1e-8)
+        
+        if c_i >= theta_s:
+            selected_mask[i] = True
+
+    selected_indices = torch.nonzero(selected_mask).squeeze()
+    print(f"SSR selected {len(selected_indices)} / {N} samples as clean.")
+    
+    return selected_indices, new_labels
+
+def ssr_consistency_loss(h1, h2):
+    """SSR+ Feature consistency loss using cosine similarity."""
+    h1 = F.normalize(h1, p=2, dim=-1)
+    h2 = F.normalize(h2, p=2, dim=-1)
+    return -(h1 * h2).sum(dim=-1).mean()
 class MultiTaskModel(nn.Module):
     """多任務 BERT 模型"""
     
