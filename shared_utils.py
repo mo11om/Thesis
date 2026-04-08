@@ -804,7 +804,11 @@ def evaluate_model(
     classification_missing_value=-100,
     numeric_missing_value=1e32,
     save_errors=False,
-    verbose=True
+    verbose=True,
+    tag_loss_fn=None,
+    time_loss_fn=None,
+    scale_loss_fn=None,
+    neg_loss=None
 ):
     """
     Evaluate the multi-task model on test data.
@@ -855,8 +859,8 @@ def evaluate_model(
             }
             
             outputs = model(input_ids, attention_mask, start_tokens, end_tokens)
-            loss, losses, tag_hits_k = compute_loss(outputs, targets, values, task_weights, hits_k=True)
-            
+            loss, losses, tag_hits_k = compute_loss(outputs, targets, values, task_weights, hits_k=True, tag_loss_fn=tag_loss_fn, time_loss_fn=time_loss_fn, scale_loss_fn=scale_loss_fn, neg_loss=neg_loss)
+
             # Extract gate values
             if "gate" in outputs:
                 gate_tensor = outputs["gate"]
@@ -1394,7 +1398,8 @@ def evaluate_model(
     task_weights,
     error_file_path,
     save_errors=False,
-    verbose=True
+    verbose=True,
+    tag_loss_fn=None, time_loss_fn=None, scale_loss_fn=None, neg_loss=None
 ):
     """
     Evaluate the model on test data with comprehensive metrics.
@@ -1445,8 +1450,8 @@ def evaluate_model(
             }
             
             outputs = model(input_ids, attention_mask, start_tokens, end_tokens)
-            loss, losses, tag_hits_k = compute_loss(outputs, targets, values, task_weights, hits_k=True)
-            
+            loss, losses, tag_hits_k = compute_loss(outputs, targets, values, task_weights, hits_k=True, tag_loss_fn=tag_loss_fn, time_loss_fn=time_loss_fn, scale_loss_fn=scale_loss_fn, neg_loss=neg_loss)
+
             # Extract gate values
             if "gate" in outputs:
                 gate_tensor = outputs["gate"]
@@ -1628,7 +1633,7 @@ def evaluate_classification(y_true, y_pred, attr=None, plot_confusion=False, sav
 # Gate-Based Filtering & Analysis
 # ============================================================================
 
-def evaluate_model_with_gate_filter(model, test_loader, device, id2scale, gate_threshold=0.5):
+def evaluate_model_with_gate_filter(model, test_loader, device, id2scale, gate_threshold=0.5, tag_loss_fn=None, time_loss_fn=None,):
     """
     Evaluates the model on samples where the average gate value <= threshold.
     Handles both single-gate and multi-gate models.
