@@ -1578,6 +1578,10 @@ def evaluate_classification(y_true, y_pred, attr=None, plot_confusion=False, sav
     recall = recall_score(y_true_filtered, y_pred_filtered, average='weighted', zero_division=0)
     f1 = f1_score(y_true_filtered, y_pred_filtered, average='weighted', zero_division=0)
     
+    macro_precision = precision_score(y_true_filtered, y_pred_filtered, average='macro', zero_division=0)
+    macro_recall = recall_score(y_true_filtered, y_pred_filtered, average='macro', zero_division=0)
+    macro_f1 = f1_score(y_true_filtered, y_pred_filtered, average='macro', zero_division=0)
+    
     metrics = {
         'accuracy': accuracy,
         'precision': precision,
@@ -1592,6 +1596,11 @@ def evaluate_classification(y_true, y_pred, attr=None, plot_confusion=False, sav
         print(f"Precision (weighted): {precision:.4f}")
         print(f"Recall (weighted): {recall:.4f}")
         print(f"F1 Score (weighted): {f1:.4f}")
+
+
+        print(f"Precision (macro): {macro_precision:.4f}")
+        print(f"Recall (macro): {macro_recall:.4f}")
+        print(f"F1 Score (macro): {macro_f1:.4f}")
         
         # Confusion matrix and report
         cm = confusion_matrix(y_true_filtered, y_pred_filtered)
