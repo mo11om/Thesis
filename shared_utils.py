@@ -1161,7 +1161,7 @@ class GateHead(nn.Module):
             "scale": gate_scale,
             "negative": gate_negative
         }
-
+from transformers import AutoModel # or whatever specific AutoModel class you use
 
 class MultiTaskModel(nn.Module):
     """
@@ -1175,7 +1175,7 @@ class MultiTaskModel(nn.Module):
     """
     def __init__(self, bert_model_name, num_tags, num_times, num_scales):
         super(MultiTaskModel, self).__init__()
-        self.bert = BertModel.from_pretrained(bert_model_name)
+        self.bert = AutoModel.from_pretrained(bert_model_name )
         hidden_size = self.bert.config.hidden_size
         
         self.tag_head = nn.Sequential(

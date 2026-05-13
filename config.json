@@ -1,22 +1,22 @@
 {
     "seed": 22,
     "data": {
-        "batch_size": 64,
+        "batch_size": 32,
         "num_workers": 10,
         "train_files": [
-            "processed_iterable_dataset/train_400k.jsonl"
+            "processed_iterable_dataset_modern/train_400k.jsonl"
         ],
         "valid_files": [
-            "processed_iterable_dataset/valid_50k.jsonl"
+            "processed_iterable_dataset_modern/valid_50k.jsonl"
         ],
         "test_files": [
-            "processed_iterable_dataset/test_50k.jsonl"
+            "processed_iterable_dataset_modern/test_50k.jsonl"
         ]
     },
     "model": {
-        "base_model": "nlpaueb/sec-bert-base",
-        "name": "secbert",
-        "date": "0426",
+        "base_model": "answerdotai/ModernBERT-base",
+        "name": "ModernBERT",
+        "date": "0513",
         "index": 173
     },
     "training": {
