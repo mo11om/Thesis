@@ -1807,3 +1807,149 @@ def evaluate_regression(y_true, y_pred, attr=None, plot_residuals=False, save_pa
         print(f"Metrics saved to {save_path}")
     
     return metrics
+
+
+
+import pandas as pd
+import numpy as np
+import torch
+from collections import defaultdict
+from tqdm import tqdm
+import csv
+import os
+
+def evaluate_model_all_gate(
+    model,
+    test_loader,
+    device,
+    task_weights,
+    error_file_path,
+    id2scale=None,
+    save_errors=False,
+    verbose=True,
+    tag_loss_fn=None, time_loss_fn=None, scale_loss_fn=None, neg_loss=None
+):
+    os.environ["WANDB_DISABLED"] = "true"
+    model.eval()
+    
+    all_losses = {"tag": 0, "time": 0, "fact": 0, "scale": 0, "negative": 0}
+    total_hits = {"hits_1": 0, "hits_3": 0, "hits_5": 0}
+    predictions = defaultdict(list)
+    ground_truths = defaultdict(list)
+    errors = defaultdict(list)
+    
+    gate_logs = []
+    test_batch_count = 0
+    
+    loader = tqdm(test_loader, desc="Evaluating") if verbose else test_loader
+    
+    with torch.no_grad():
+        for batch_idx, batch in enumerate(loader):
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
+            start_tokens = batch["start_token"].to(device)
+            end_tokens = batch["end_token"].to(device)
+            values = batch["value"].to(device)
+            
+            targets = {
+                "tag": batch["tag"].to(device),
+                "time": batch["time"].to(device),
+                "fact": batch["fact"].to(device),
+                "scale": batch["scale"].to(device),
+                "negative": batch["negative"].to(device)
+            }
+            
+            outputs = model(input_ids, attention_mask, start_tokens, end_tokens)
+            loss, losses, tag_hits_k = compute_loss(
+                outputs, targets, values, task_weights, hits_k=True, 
+                tag_loss_fn=tag_loss_fn, time_loss_fn=time_loss_fn, 
+                scale_loss_fn=scale_loss_fn, neg_loss=neg_loss
+            )
+
+            # ==========================================
+            # 🚨 REVISED: INDIVIDUAL GATE EXTRACTION
+            # ==========================================
+            batch_size = input_ids.size(0)
+            gates_dict = outputs.get("gates", {})
+            
+            # Extract individual task gates (fallback to 0 if missing)
+            gate_tag = gates_dict.get("tag", torch.zeros(batch_size, 1)).squeeze(-1).cpu().tolist()
+            gate_time = gates_dict.get("time", torch.zeros(batch_size, 1)).squeeze(-1).cpu().tolist()
+            gate_scale = gates_dict.get("scale", torch.zeros(batch_size, 1)).squeeze(-1).cpu().tolist()
+            gate_neg = gates_dict.get("negative", torch.zeros(batch_size, 1)).squeeze(-1).cpu().tolist()
+            
+            batch_input_ids = input_ids.cpu().tolist()
+            
+            for i in range(batch_size):
+                gate_logs.append({
+                    "batch_idx": batch_idx, 
+                    "sample_idx": i, 
+                    "gate_tag": gate_tag[i],
+                    "gate_time": gate_time[i],
+                    "gate_scale": gate_scale[i],
+                    "gate_negative": gate_neg[i],
+                    "input_ids": batch_input_ids[i] 
+                })
+            # ==========================================
+
+            test_batch_count += 1
+            
+            if tag_hits_k:
+                for key in total_hits:
+                    total_hits[key] += tag_hits_k[key]
+            
+            for key in all_losses:
+                if key in losses:
+                    val = losses[key]
+                    all_losses[key] += val.item() if isinstance(val, torch.Tensor) else val
+            
+            # Classification predictions
+            for key in ["scale", "negative", "tag", "time"]:
+                pred = torch.argmax(outputs[key], dim=-1).cpu().tolist()
+                true = targets[key].cpu().tolist()
+                
+                for i, (p, t) in enumerate(zip(pred, true)):
+                    predictions[key].append(p)
+                    ground_truths[key].append(t)
+                    if p != t:
+                        errors[key].append({
+                            "batch_idx": batch_idx, "sample_idx": i,
+                            "true": t, "pred": p, 
+                            "gate": gates_dict.get(key, torch.zeros(batch_size, 1)).squeeze(-1).cpu().tolist()[i] # Specific gate for error log
+                        })
+            
+            # Fact predictions
+            if "fact" in targets and id2scale is not None:
+                negative_pred = outputs["negative"].argmax(dim=-1).cpu().numpy()
+                scale_pred_class = outputs["scale"].argmax(dim=-1).cpu().numpy() if "scale" in outputs else np.ones_like(values.cpu().numpy(), dtype=np.int64)
+                
+                id2scale_np = np.array([float(id2scale[idx]) for idx in range(len(id2scale))], dtype=np.float64)
+                scale_pred_values = id2scale_np[scale_pred_class]
+                
+                values_np = values.cpu().numpy()
+                fact_pred = values_np * ((-1) ** negative_pred) * (10 ** scale_pred_values)
+                fact_target = targets["fact"].view(-1).cpu().numpy()
+                
+                for i, (p, t) in enumerate(zip(fact_pred, fact_target)):
+                    if t > 1e30: continue
+                    predictions["fact"].append(p)
+                    ground_truths["fact"].append(t)
+    
+    for key in all_losses:
+        all_losses[key] /= test_batch_count if test_batch_count > 0 else 1
+    
+    avg_hits_k = {key: total_hits[key] / test_batch_count for key in total_hits if test_batch_count > 0}
+    
+    if save_errors:
+        for key, error_list in errors.items():
+            if error_list:
+                error_file = f"{error_file_path}_errors_{key}.csv"
+                fieldnames = ["batch_idx", "sample_idx", "true", "pred", "gate"]
+                with open(error_file, mode="w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    writer.writerows(error_list)
+
+    # Return the comprehensive gate DataFrame
+    gate_df = pd.DataFrame(gate_logs)
+    return all_losses, dict(predictions), dict(ground_truths), avg_hits_k, gate_df
