@@ -9,3 +9,6 @@ result/
 __pycache__/
 sister/fewshot/few-shot.ipynb
 sister/fewshot/.env
+gate/
+paper/ 
+processed_iterable_dataset_modern/

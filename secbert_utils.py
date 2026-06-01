@@ -22,7 +22,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 from transformers import BertModel
 from sklearn.utils.class_weight import compute_class_weight
-
+from transformers import AutoModel
 # ============================================================================
 # Global Constants
 # ============================================================================
