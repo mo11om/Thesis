@@ -4,19 +4,19 @@
         "batch_size": 32,
         "num_workers": 10,
         "train_files": [
-            "processed_iterable_dataset_modern/train_400k.jsonl"
+            "processed_iterable_dataset_bge/train_400k.jsonl"
         ],
         "valid_files": [
-            "processed_iterable_dataset_modern/valid_50k.jsonl"
+            "processed_iterable_dataset_bge/valid_50k.jsonl"
         ],
         "test_files": [
-            "processed_iterable_dataset_modern/test_50k.jsonl"
+            "processed_iterable_dataset_bge/test_50k_filtered.jsonl"
         ]
     },
     "model": {
-        "base_model": "answerdotai/ModernBERT-base",
-        "name": "ModernBERT",
-        "date": "0513",
+        "base_model": "BAAI/bge-base-en",
+        "name": "bge",
+        "date": "0601",
         "index": 173
     },
     "training": {
