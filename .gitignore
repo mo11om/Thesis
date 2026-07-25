@@ -13,3 +13,4 @@ gate/
 paper/ 
 processed_iterable_dataset_modern/
 processed_iterable_dataset_bge/ 
+log/*
