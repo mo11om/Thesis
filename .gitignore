@@ -11,4 +11,7 @@ sister/fewshot/few-shot.ipynb
 sister/fewshot/.env
 gate/
 paper/ 
-processed_iterable_dataset_modern/
+gate/*
+processed_iterable_dataset_bge/*
+processed_iterable_dataset_modern/*
+log/*
