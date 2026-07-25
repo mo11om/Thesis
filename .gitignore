@@ -11,3 +11,5 @@ sister/fewshot/few-shot.ipynb
 sister/fewshot/.env
 gate/
 log/
+processed_iterable_dataset_bge/*
+processed_iterable_dataset_modern/* 
